@@ -1,0 +1,20 @@
+
+# Sonya: local settings, dependencies and runtime files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.session
+*.session-*
+*.db
+*.db-*
+.venv/
+venv/
+node_modules/
+__pycache__/
+*.pyc
+data/
+tmp/
+build/
+dist/
