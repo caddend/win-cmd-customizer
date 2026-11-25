@@ -1,193 +1,269 @@
-# Customize-Cmd.ps1
-# Настройка внешнего вида командной строки Windows (cmd.exe) через реестр HKCU:\Console
+﻿#requires -Version 5.1
+<#
+.SYNOPSIS
+Настройка классической консоли Windows с резервной копией и восстановлением.
+.EXAMPLE
+.\Customize-Cmd.ps1 -Action Apply -Theme Dracula -Opacity 90 -WhatIf
+.EXAMPLE
+.\Customize-Cmd.ps1 -Action Restore
+#>
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
+param(
+    [ValidateSet('Menu', 'Apply', 'Restore', 'Reset', 'Status')]
+    [string]$Action = 'Menu',
+    [ValidateSet('Matrix', 'Dracula', 'RetroAmber')][string]$Theme,
+    [ValidateSet('Consolas', 'Lucida Console', 'Cascadia Code')][string]$Font,
+    [ValidateRange(8, 72)][int]$FontSize = 18,
+    [ValidateSet('Small', 'Full')][string]$Cursor,
+    [ValidateRange(30, 100)][int]$Opacity,
+    [string]$BackupPath = (Join-Path $PSScriptRoot 'backups\original-console.json')
+)
 
-[CmdletBinding()]
-param()
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$ConsoleRegPath = 'HKCU:\Console'
+$ManagedNames = @((0..15 | ForEach-Object { 'ColorTable{0:D2}' -f $_ })) + @(
+    'ScreenColors', 'PopupColors', 'FaceName', 'FontSize', 'FontFamily',
+    'FontWeight', 'CursorSize', 'CursorType', 'WindowAlpha'
+)
 
-$ConsoleRegPath = "HKCU:\Console"
+function ConvertTo-ColorRef {
+    param([ValidatePattern('^[0-9a-fA-F]{6}$')][string]$Rgb)
+    $r = [Convert]::ToInt32($Rgb.Substring(0, 2), 16)
+    $g = [Convert]::ToInt32($Rgb.Substring(2, 2), 16)
+    $b = [Convert]::ToInt32($Rgb.Substring(4, 2), 16)
+    return ($r -bor ($g -shl 8) -bor ($b -shl 16))
+}
 
-function Ensure-RegistryPath {
-    if (-not (Test-Path $ConsoleRegPath)) {
-        New-Item -Path $ConsoleRegPath -Force | Out-Null
+# Human-readable RGB; the registry expects COLORREF (0x00BBGGRR).
+$Schemes = @{
+    Matrix = @{
+        Colors = '000000 003300 008000 005500 000011 330033 444400 00AA00 002200 00FF00 00CC00 66FF00 000033 660066 FFFF00 00FF00'
+        Screen = 0x0A; Popup = 0x02
+    }
+    Dracula = @{
+        Colors = '282A36 6272A4 50FA7B 8BE9FD FF5555 FF79C6 F1FA8C F8F8F2 44475A 6272A4 50FA7B 8BE9FD FF5555 FF79C6 F1FA8C FFFFFF'
+        Screen = 0x07; Popup = 0x85
+    }
+    RetroAmber = @{
+        Colors = '000000 201000 804000 603000 800000 400020 905000 FF8000 302000 FFA500 FFB500 FFD000 FF0000 800040 FFE000 FFFF00'
+        Screen = 0x0E; Popup = 0x06
     }
 }
 
-function Set-ConsoleProperty {
-    param (
-        [string]$Name,
-        [object]$Value,
-        [string]$Type = "DWord"
-    )
-    Ensure-RegistryPath
-    Set-ItemProperty -Path $ConsoleRegPath -Name $Name -Value $Value -Type $Type -Force
-}
-
-$ColorSchemes = @{
-    "1" = @{
-        Name       = "Matrix (Зеленый на черном)"
-        ColorTable = @(
-            0x00000000, 0x00003300, 0x00008000, 0x00005500,
-            0x00110000, 0x00330033, 0x00004444, 0x0000aa00,
-            0x00002200, 0x0000ff00, 0x0000cc00, 0x0000ff66,
-            0x00330000, 0x00660066, 0x0000ffff, 0x0000ff00
-        )
-        ScreenColors = 0x0A
-        PopupColors  = 0x02
+function Get-ConsoleSnapshot {
+    $values = @()
+    if (Test-Path -LiteralPath $ConsoleRegPath) {
+        $key = Get-Item -LiteralPath $ConsoleRegPath
+        try {
+            foreach ($name in $ManagedNames) {
+                if ($key.GetValueNames() -contains $name) {
+                    $values += [pscustomobject]@{
+                        Name = $name
+                        Kind = $key.GetValueKind($name).ToString()
+                        Value = $key.GetValue($name)
+                    }
+                }
+            }
+        } finally { $key.Close() }
     }
-    "2" = @{
-        Name       = "Dracula (Темно-фиолетовая тема)"
-        ColorTable = @(
-            0x00282a36, 0x006272a4, 0x0050fa7b, 0x008be9fd,
-            0x00ff5555, 0x00ff79c6, 0x00f1fa8c, 0x00f8f8f2,
-            0x0044475a, 0x006272a4, 0x0050fa7b, 0x008be9fd,
-            0x00ff5555, 0x00ff79c6, 0x00f1fa8c, 0x00ffffff
-        )
-        ScreenColors = 0x07
-        PopupColors  = 0x85
-    }
-    "3" = @{
-        Name       = "Retro Amber (Янтарный терминал)"
-        ColorTable = @(
-            0x00000000, 0x00001020, 0x00004080, 0x00003060,
-            0x00000080, 0x00200040, 0x00005090, 0x000080ff,
-            0x00002030, 0x0000a5ff, 0x0000b5ff, 0x0000d0ff,
-            0x000000ff, 0x00400080, 0x0000e0ff, 0x0000ffff
-        )
-        ScreenColors = 0x0E
-        PopupColors  = 0x06
+    [pscustomobject]@{
+        Version = 1
+        Target = $ConsoleRegPath
+        CreatedUtc = [DateTime]::UtcNow.ToString('o')
+        Values = @($values)
     }
 }
 
-$Fonts = @{
-    "1" = @{ Name = "Consolas"; Size = 0x00120000 }      # 18 pt
-    "2" = @{ Name = "Lucida Console"; Size = 0x00100000 }# 16 pt
-    "3" = @{ Name = "Cascadia Code"; Size = 0x00120000 } # 18 pt
-}
-
-function Apply-Scheme {
-    param ([string]$Key)
-
-    if (-not $ColorSchemes.ContainsKey($Key)) {
-        Write-Warning "Неверный выбор схемы."
-        return
+function Read-ConsoleBackup {
+    $snapshot = Get-Content -LiteralPath $BackupPath -Raw | ConvertFrom-Json
+    if ($snapshot.Version -ne 1 -or $snapshot.Target -ne $ConsoleRegPath -or $snapshot.Values -isnot [array]) {
+        throw 'Несовместимая резервная копия: версия или ветка реестра не совпадает.'
     }
-
-    $scheme = $ColorSchemes[$Key]
-    Ensure-RegistryPath
-
-    for ($i = 0; $i -lt 16; $i++) {
-        $regName = "ColorTable{0:D2}" -f $i
-        Set-ConsoleProperty -Name $regName -Value $scheme.ColorTable[$i] -Type "DWord"
-    }
-
-    Set-ConsoleProperty -Name "ScreenColors" -Value $scheme.ScreenColors -Type "DWord"
-    Set-ConsoleProperty -Name "PopupColors" -Value $scheme.PopupColors -Type "DWord"
-    Write-Host "Цветовая схема '$($scheme.Name)' успешно применена!" -ForegroundColor Green
-}
-
-function Apply-Font {
-    param ([string]$Key)
-
-    if (-not $Fonts.ContainsKey($Key)) {
-        Write-Warning "Неверный выбор шрифта."
-        return
-    }
-
-    $font = $Fonts[$Key]
-    Set-ConsoleProperty -Name "FaceName" -Value $font.Name -Type "String"
-    Set-ConsoleProperty -Name "FontSize" -Value $font.Size -Type "DWord"
-    Set-ConsoleProperty -Name "FontFamily" -Value 0x00000036 -Type "DWord"
-    Set-ConsoleProperty -Name "FontWeight" -Value 400 -Type "DWord"
-    Write-Host "Шрифт '$($font.Name)' успешно применен!" -ForegroundColor Green
-}
-
-function Apply-CursorSettings {
-    param (
-        [int]$CursorSize,
-        [int]$CursorType = 0
-    )
-    Set-ConsoleProperty -Name "CursorSize" -Value $CursorSize -Type "DWord"
-    Set-ConsoleProperty -Name "CursorType" -Value $CursorType -Type "DWord"
-    Write-Host "Параметры курсора обновлены!" -ForegroundColor Green
-}
-
-function Apply-Opacity {
-    param ([int]$Percent)
-    if ($Percent -lt 30 -or $Percent -gt 100) {
-        Write-Warning "Прозрачность должна быть в диапазоне от 30 до 100."
-        return
-    }
-    $val = [int]($Percent * 255 / 100)
-    Set-ConsoleProperty -Name "WindowAlpha" -Value $val -Type "DWord"
-    Write-Host "Непрозрачность установлена на $Percent%." -ForegroundColor Green
-}
-
-function Reset-ToDefaults {
-    $defaultColors = @(
-        0x00000000, 0x00800000, 0x00008000, 0x00808000,
-        0x00000080, 0x00800080, 0x00008080, 0x00c0c0c0,
-        0x00808080, 0x00ff0000, 0x0000ff00, 0x00ffff00,
-        0x000000ff, 0x00ff00ff, 0x0000ffff, 0x00ffffff
-    )
-
-    Ensure-RegistryPath
-    for ($i = 0; $i -lt 16; $i++) {
-        $regName = "ColorTable{0:D2}" -f $i
-        Set-ConsoleProperty -Name $regName -Value $defaultColors[$i] -Type "DWord"
-    }
-
-    Set-ConsoleProperty -Name "ScreenColors" -Value 0x07 -Type "DWord"
-    Set-ConsoleProperty -Name "PopupColors" -Value 0x85 -Type "DWord"
-    Set-ConsoleProperty -Name "FaceName" -Value "Consolas" -Type "String"
-    Set-ConsoleProperty -Name "FontSize" -Value 0x00100000 -Type "DWord"
-    Set-ConsoleProperty -Name "CursorSize" -Value 25 -Type "DWord"
-    Set-ConsoleProperty -Name "WindowAlpha" -Value 255 -Type "DWord"
-
-    Write-Host "Настройки консоли сброшены к значениям по умолчанию!" -ForegroundColor Yellow
-}
-
-function Show-Menu {
-    Clear-Host
-    Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "       Кастомизация Windows CMD (HKCU)        " -ForegroundColor Cyan
-    Write-Host "==============================================" -ForegroundColor Cyan
-    Write-Host "1. Цветовая схема Matrix (Green on Black)"
-    Write-Host "2. Цветовая схема Dracula"
-    Write-Host "3. Цветовая схема Retro Amber"
-    Write-Host "4. Шрифт Consolas (18pt)"
-    Write-Host "5. Шрифт Lucida Console (16pt)"
-    Write-Host "6. Шрифт Cascadia Code (18pt)"
-    Write-Host "7. Курсор: Тонкий блок (Small)"
-    Write-Host "8. Курсор: Полный квадрат (Full)"
-    Write-Host "9. Настроить прозрачность окна (30-100%)"
-    Write-Host "0. Сбросить все настройки к стандартным"
-    Write-Host "Q. Выход"
-    Write-Host "----------------------------------------------"
-}
-
-do {
-    Show-Menu
-    $choice = Read-Host "Выберите пункт меню"
-    switch ($choice) {
-        "1" { Apply-Scheme -Key "1" }
-        "2" { Apply-Scheme -Key "2" }
-        "3" { Apply-Scheme -Key "3" }
-        "4" { Apply-Font -Key "1" }
-        "5" { Apply-Font -Key "2" }
-        "6" { Apply-Font -Key "3" }
-        "7" { Apply-CursorSettings -CursorSize 25 }
-        "8" { Apply-CursorSettings -CursorSize 100 }
-        "9" {
-            $p = Read-Host "Введите процент непрозрачности (30-100)"
-            Apply-Opacity -Percent ([int]$p)
+    $seen = @{}
+    foreach ($entry in $snapshot.Values) {
+        if ($entry.Name -notin $ManagedNames -or $seen.ContainsKey($entry.Name)) {
+            throw 'Резервная копия содержит неизвестные или повторяющиеся параметры.'
         }
-        "0" { Reset-ToDefaults }
-        "Q" { Write-Host "Выход из программы..."; break }
-        "q" { Write-Host "Выход из программы..."; break }
-        default { Write-Warning "Неизвестный параметр. Нажмите Enter для повтора." }
+        $seen[$entry.Name] = $true
+        if ($entry.Name -eq 'FaceName') {
+            if ($entry.Kind -ne 'String' -or $entry.Value -isnot [string]) {
+                throw 'Некорректный тип шрифта в резервной копии.'
+            }
+        } elseif ($entry.Kind -ne 'DWord' -or
+            $entry.Value -isnot [ValueType] -or
+            [double]$entry.Value -ne [Math]::Truncate([double]$entry.Value) -or
+            [double]$entry.Value -lt [int]::MinValue -or
+            [double]$entry.Value -gt [int]::MaxValue) {
+            throw 'Некорректный DWORD в резервной копии.'
+        }
     }
-    if ($choice -notin @("Q", "q")) {
-        Write-Host "`nИзменения применятся к новым окнам cmd.exe." -ForegroundColor DarkGray
-        Pause
+    return $snapshot
+}
+
+function Save-OriginalSettings {
+    # Never replace the first snapshot with already customized settings.
+    if (Test-Path -LiteralPath $BackupPath) {
+        $null = Read-ConsoleBackup
+        return
     }
-} while ($choice -notin @("Q", "q"))
+    $snapshot = Get-ConsoleSnapshot
+    $parent = Split-Path -Parent ([IO.Path]::GetFullPath($BackupPath))
+    $null = New-Item -ItemType Directory -Path $parent -Force
+    $stream = [IO.File]::Open($BackupPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write)
+    try {
+        $bytes = [Text.Encoding]::UTF8.GetBytes(($snapshot | ConvertTo-Json -Depth 5))
+        $stream.Write($bytes, 0, $bytes.Length)
+    } finally { $stream.Dispose() }
+    $null = Read-ConsoleBackup
+    Write-Host "Исходные настройки сохранены: $BackupPath" -ForegroundColor DarkGray
+}
+
+function Write-ConsoleValues {
+    param([System.Collections.IDictionary]$Values)
+    if (-not (Test-Path -LiteralPath $ConsoleRegPath)) {
+        $null = New-Item -Path $ConsoleRegPath -Force
+    }
+    foreach ($name in $Values.Keys) {
+        $kind = if ($name -eq 'FaceName') { 'String' } else { 'DWord' }
+        $null = New-ItemProperty -LiteralPath $ConsoleRegPath -Name $name -Value $Values[$name] -PropertyType $kind -Force
+    }
+}
+
+function Get-ApplyValues {
+    param([hashtable]$Options)
+    $values = [ordered]@{}
+    if ($Options.ContainsKey('Theme') -and $Options.Theme) {
+        $scheme = $Schemes[$Options.Theme]
+        $colors = $scheme.Colors.Split(' ')
+        for ($i = 0; $i -lt 16; $i++) {
+            $values[('ColorTable{0:D2}' -f $i)] = ConvertTo-ColorRef $colors[$i]
+        }
+        $values.ScreenColors = $scheme.Screen
+        $values.PopupColors = $scheme.Popup
+    }
+    if ($Options.ContainsKey('Font') -and $Options.Font) {
+        Add-Type -AssemblyName System.Drawing
+        $collection = New-Object System.Drawing.Text.InstalledFontCollection
+        try {
+            if ($Options.Font -notin @($collection.Families | ForEach-Object { $_.Name })) {
+                throw "Шрифт '$($Options.Font)' не установлен. Установите его или выберите другой."
+            }
+        } finally { $collection.Dispose() }
+        $values.FaceName = $Options.Font
+        $values.FontSize = $Options.FontSize -shl 16
+        $values.FontFamily = 0x36
+        $values.FontWeight = 400
+    }
+    if ($Options.ContainsKey('Cursor') -and $Options.Cursor) {
+        $values.CursorSize = if ($Options.Cursor -eq 'Full') { 100 } else { 25 }
+        $values.CursorType = 0
+    }
+    if ($Options.ContainsKey('Opacity')) {
+        $values.WindowAlpha = [int][Math]::Round($Options.Opacity * 255 / 100, [MidpointRounding]::AwayFromZero)
+    }
+    if ($values.Count -eq 0) { throw 'Для Apply укажите Theme, Font, Cursor или Opacity.' }
+    return ,$values
+}
+
+function Invoke-ConsoleAction {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([string]$Operation, [hashtable]$Options = @{})
+    if ($Operation -eq 'Status') {
+        (Get-ConsoleSnapshot).Values | Format-Table Name, Kind, Value -AutoSize
+        return
+    }
+    $values = $null
+    if ($Operation -eq 'Apply') { $values = Get-ApplyValues $Options }
+    if ($Operation -eq 'Restore') { $snapshot = Read-ConsoleBackup }
+    $description = switch ($Operation) {
+        'Apply' { 'Применить: ' + (($values.Keys | ForEach-Object { "$_=$($values[$_])" }) -join ', ') }
+        'Restore' { "Восстановить исходные настройки из $BackupPath" }
+        'Reset' { 'Удалить управляемые переопределения консоли (включая шрифт и тип курсора)' }
+        default { throw "Неизвестная операция: $Operation" }
+    }
+    if (-not $PSCmdlet.ShouldProcess($ConsoleRegPath, $description)) { return }
+    if ($Operation -ne 'Restore') { Save-OriginalSettings }
+    if ($Operation -eq 'Apply') {
+        Write-ConsoleValues $values
+    } else {
+        # Keep unrelated settings and all per-app subkeys.
+        if (Test-Path -LiteralPath $ConsoleRegPath) {
+            $existing = @((Get-ItemProperty -LiteralPath $ConsoleRegPath).PSObject.Properties | ForEach-Object { $_.Name })
+            foreach ($name in $ManagedNames) {
+                if ($name -in $existing) {
+                    Remove-ItemProperty -LiteralPath $ConsoleRegPath -Name $name
+                }
+            }
+        }
+        if ($Operation -eq 'Restore') {
+            $restored = [ordered]@{}
+            foreach ($entry in $snapshot.Values) { $restored[$entry.Name] = $entry.Value }
+            if ($restored.Count -gt 0) { Write-ConsoleValues $restored }
+        }
+    }
+    Write-Host 'Готово. Откройте новое окно классической консоли Windows.' -ForegroundColor Green
+}
+
+function Show-ConsoleMenu {
+    while ($true) {
+        Write-Host "`n=== Настройка классической консоли Windows ===" -ForegroundColor Cyan
+        Write-Host 'HKCU:\Console: общие настройки Console Host, включая другие консольные приложения.'
+        Write-Host '1 Matrix | 2 Dracula | 3 Retro Amber'
+        Write-Host '4 Consolas (18 px) | 5 Lucida Console (16 px) | 6 Cascadia Code (18 px)'
+        Write-Host '7 Тонкий курсор | 8 Полный курсор | 9 Непрозрачность'
+        Write-Host '0 Сброс переопределений | R Восстановление | S Текущие настройки | Q Выход'
+        $choice = Read-Host 'Выберите пункт'
+        if ($null -eq $choice) { return }
+        $choice = $choice.Trim().ToUpperInvariant()
+        if ($choice -eq 'Q') { return }
+        try {
+            switch ($choice) {
+                '1' { Invoke-ConsoleAction Apply @{Theme = 'Matrix'} }
+                '2' { Invoke-ConsoleAction Apply @{Theme = 'Dracula'} }
+                '3' { Invoke-ConsoleAction Apply @{Theme = 'RetroAmber'} }
+                '4' { Invoke-ConsoleAction Apply @{Font = 'Consolas'; FontSize = 18} }
+                '5' { Invoke-ConsoleAction Apply @{Font = 'Lucida Console'; FontSize = 16} }
+                '6' { Invoke-ConsoleAction Apply @{Font = 'Cascadia Code'; FontSize = 18} }
+                '7' { Invoke-ConsoleAction Apply @{Cursor = 'Small'} }
+                '8' { Invoke-ConsoleAction Apply @{Cursor = 'Full'} }
+                '9' {
+                    $inputValue = Read-Host 'Непрозрачность (30-100%)'
+                    $percent = 0
+                    if (-not [int]::TryParse($inputValue, [ref]$percent) -or $percent -lt 30 -or $percent -gt 100) {
+                        throw 'Введите целое число от 30 до 100.'
+                    }
+                    Invoke-ConsoleAction Apply @{Opacity = $percent}
+                }
+                '0' {
+                    if ((Read-Host 'Удалить переопределения? Введите ДА') -eq 'ДА') { Invoke-ConsoleAction Reset }
+                }
+                'R' { Invoke-ConsoleAction Restore }
+                'S' { Invoke-ConsoleAction Status }
+                default { Write-Warning 'Неизвестный пункт меню.' }
+            }
+        } catch { Write-Warning $_.Exception.Message }
+    }
+}
+
+# Dot-sourcing loads functions for isolated tests without executing the menu.
+if ($MyInvocation.InvocationName -ne '.') {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
+        throw 'Утилита поддерживает только Windows.'
+    }
+    $settingNames = @('Theme', 'Font', 'FontSize', 'Cursor', 'Opacity')
+    $specifiedSettings = @($settingNames | Where-Object { $PSBoundParameters.ContainsKey($_) })
+    if ($Action -ne 'Apply' -and $specifiedSettings.Count -gt 0) {
+        throw 'Параметры оформления требуют -Action Apply.'
+    }
+    if ($PSBoundParameters.ContainsKey('FontSize') -and -not $Font) {
+        throw 'Укажите -Font вместе с -FontSize.'
+    }
+    if ($Action -eq 'Menu') {
+        Show-ConsoleMenu
+    } else {
+        $options = @{Theme = $Theme; Font = $Font; FontSize = $FontSize; Cursor = $Cursor}
+        if ($PSBoundParameters.ContainsKey('Opacity')) { $options.Opacity = $Opacity }
+        Invoke-ConsoleAction -Operation $Action -Options $options
+    }
+}

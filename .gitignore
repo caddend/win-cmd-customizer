@@ -18,3 +18,7 @@ data/
 tmp/
 build/
 dist/
+
+# Console customizer backups and test scratch files
+backups/
+tests/.scratch-*/
